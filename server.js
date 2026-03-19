@@ -49,6 +49,18 @@ app.post('/subscribe', (req, res) => {
   res.json({ ok: true });
 });
 
+app.post('/test-notif', (req, res) => {
+  if (!userData) return res.status(400).json({ error: 'Pas de subscription' });
+  const payload = JSON.stringify({
+    title: 'Test notification',
+    body: 'Si tu vois ça, les notifications fonctionnent !',
+    tag: 'test'
+  });
+  webpush.sendNotification(userData.subscription, payload)
+    .then(() => { console.log('[test-notif] envoyée'); res.json({ ok: true }); })
+    .catch(err => { console.error('[test-notif] erreur:', err.statusCode, err.body); res.status(500).json({ error: err.message }); });
+});
+
 app.post('/update-habits', (req, res) => {
   if (!req.body.habits) return res.status(400).json({ error: 'Missing habits' });
   if (userData) {
