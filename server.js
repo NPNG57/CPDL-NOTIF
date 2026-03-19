@@ -1,7 +1,6 @@
 const express = require('express');
 const webpush = require('web-push');
 const cors = require('cors');
-const fs = require('fs');
 
 const app = express();
 app.use(express.json());
@@ -10,39 +9,43 @@ app.use(cors({ origin: '*' }));
 const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY;
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY;
 const VAPID_EMAIL = process.env.VAPID_EMAIL;
+const TIMEZONE_OFFSET = parseInt(process.env.TIMEZONE_OFFSET || '1');
 
 webpush.setVapidDetails(VAPID_EMAIL, VAPID_PUBLIC, VAPID_PRIVATE);
 
-const DATA_FILE = './data.json';
 let userData = null;
 
-function loadData() {
-  try {
-    if (fs.existsSync(DATA_FILE)) {
-      userData = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    }
-  } catch(e) {}
-}
-
-function saveData() {
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(userData));
-  } catch(e) {}
-}
-
-loadData();
-
-app.get('/ping', (req, res) => res.json({ ok: true }));
+app.get('/ping', (req, res) => {
+  console.log('[ping] serveur actif');
+  res.json({ ok: true });
+});
 
 app.get('/vapid-public-key', (req, res) => {
   res.json({ key: VAPID_PUBLIC });
+});
+
+app.get('/status', (req, res) => {
+  if (!userData) {
+    res.json({ subscribed: false });
+    return;
+  }
+  res.json({
+    subscribed: true,
+    habitsCount: userData.habits.length,
+    habits: userData.habits.map(h => ({
+      name: h.name,
+      notifEnabled: h.notification?.enabled,
+      notifTime: h.notification?.time,
+      days: h.days
+    }))
+  });
 });
 
 app.post('/subscribe', (req, res) => {
   const { subscription, habits } = req.body;
   if (!subscription || !habits) return res.status(400).json({ error: 'Missing data' });
   userData = { subscription, habits };
-  saveData();
+  console.log('[subscribe] subscription reçue, habitudes:', habits.length);
   res.json({ ok: true });
 });
 
@@ -50,23 +53,29 @@ app.post('/update-habits', (req, res) => {
   if (!req.body.habits) return res.status(400).json({ error: 'Missing habits' });
   if (userData) {
     userData.habits = req.body.habits;
-    saveData();
+    console.log('[update-habits] habitudes mises à jour:', req.body.habits.length);
   }
   res.json({ ok: true });
 });
 
 function checkAndSend() {
-  if (!userData) return;
   const now = new Date();
-  const hh = String(now.getHours()).padStart(2, '0');
-  const mm = String(now.getMinutes()).padStart(2, '0');
+  const localNow = new Date(now.getTime() + TIMEZONE_OFFSET * 3600000);
+  const hh = String(localNow.getUTCHours()).padStart(2, '0');
+  const mm = String(localNow.getUTCMinutes()).padStart(2, '0');
   const timeStr = hh + ':' + mm;
-  const dow = now.getDay();
+  const dow = localNow.getUTCDay();
+
+  console.log('[check] heure locale:', timeStr, '| jour:', dow, '| subscription:', !!userData);
+
+  if (!userData) return;
 
   userData.habits.forEach(habit => {
     if (!habit.notification || !habit.notification.enabled) return;
     if (habit.notification.time !== timeStr) return;
     if (!habit.days.includes(dow)) return;
+
+    console.log('[notif] envoi pour:', habit.name);
 
     const payload = JSON.stringify({
       title: 'Habitudes',
@@ -74,12 +83,15 @@ function checkAndSend() {
       tag: habit.id
     });
 
-    webpush.sendNotification(userData.subscription, payload).catch(err => {
-      if (err.statusCode === 410 || err.statusCode === 404) {
-        userData = null;
-        saveData();
-      }
-    });
+    webpush.sendNotification(userData.subscription, payload)
+      .then(() => console.log('[notif] envoyée avec succès:', habit.name))
+      .catch(err => {
+        console.error('[notif] erreur:', err.statusCode, err.body);
+        if (err.statusCode === 410 || err.statusCode === 404) {
+          console.log('[notif] subscription expirée, suppression');
+          userData = null;
+        }
+      });
   });
 }
 
